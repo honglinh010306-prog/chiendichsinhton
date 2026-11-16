@@ -3,11 +3,12 @@ const progress = document.querySelector('#progress');
 const save = document.querySelector('#save');
 const retry = document.querySelector('#retry');
 const partSize = 16 * 1024 * 1024;
-const fileSize = 132088986;
+const fileSize = 132086701;
+const downloadDirectory = 'downloads/windows-1.0.0-d1c15e3f';
 const downloadParts = Math.ceil(fileSize / partSize);
 
 async function loadPart(index) {
-  const response = await fetch(`downloads/windows-1.0.0/part-${index}.bin`);
+  const response = await fetch(`${downloadDirectory}/part-${index}.bin`);
   if (!response.ok) throw new Error(`Download part ${index}: ${response.status}`);
   const bytes = await response.arrayBuffer();
   const expectedSize = Math.min(partSize, fileSize - index * partSize);
