@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0d1710">
+  <link rel="icon" type="image/png" sizes="64x64" href="../assets/favicon-chien-dich-sinh-ton.png">
+  <title>CHIẾN DỊCH SINH TỒN — Bản chơi thử</title>
+  <style>
+    :root { color-scheme: dark; color: #eff7e9; background: #0d1710; font: 16px/1.5 system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 840px; width: calc(100% - 28px); margin: 20px auto; }
+    h1 { font-size: clamp(34px, 7vw, 64px); letter-spacing: -.04em; line-height: 1; margin: 0; }
+    p { margin: 10px 0; color: #bdcdbc; }
+    .hud { display: flex; flex-wrap: wrap; gap: 6px 20px; margin: 12px 0 8px; color: #b9f34f; font-weight: 700; }
+    .arena { position: relative; }
+    canvas { display: block; width: 100%; height: auto; border: 1px solid #677067; cursor: crosshair; touch-action: none; }
+    .overlay { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; padding: 12px; background: #0d1710ce; text-align: center; }
+    .overlay[hidden] { display: none; }
+    .overlay strong { font-size: clamp(22px, 5vw, 42px); }
+    button { color: inherit; font: 700 15px/1.2 system-ui, sans-serif; background: #23402a; border: 1px solid #708071; min-height: 44px; padding-inline: 12px; cursor: pointer; touch-action: none; }
+    button:focus-visible { outline: 2px solid #b9f34f; outline-offset: 3px; }
+    .action { margin-top: 10px; background: #b9f34f; color: #14210d; border-color: #b9f34f; }
+    .controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
+    .dpad { display: grid; grid-template-columns: repeat(3, 44px); gap: 4px; }
+    .dpad button:first-child { grid-column: 2; }
+    .dpad button:nth-child(2) { grid-column: 1; }
+    .dpad button { font-size: 20px; padding: 0; }
+    .combat { display: flex; gap: 5px; }
+    #message { min-height: 1.5em; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>CHIẾN DỊCH SINH TỒN</h1>
+    <p>Sống sót qua ba đợt zombie. Di chuyển bằng WASD hoặc phím mũi tên. Dùng chuột để ngắm và bắn, Space để bắn mục tiêu gần nhất, R để nạp đạn.</p>
+    <div class="hud" aria-label="Trạng thái trận đấu">
+      <span id="health"></span><span id="ammo"></span><span id="wave"></span><span id="score"></span>
+    </div>
+    <div class="arena">
+      <canvas width="840" height="510" role="img" aria-label="Khu phong tỏa, nhìn từ trên xuống"></canvas>
+      <div class="overlay" id="overlay">
+        <strong id="result">Chờ sơ tán</strong>
+        <button class="action" id="start" type="button">Bắt đầu</button>
+      </div>
+    </div>
+    <div class="controls" aria-label="Điều khiển trên màn hình">
+      <div class="dpad">
+        <button type="button" data-command="up" aria-label="Lên">↑</button>
+        <button type="button" data-command="left" aria-label="Trái">←</button>
+        <button type="button" data-command="down" aria-label="Xuống">↓</button>
+        <button type="button" data-command="right" aria-label="Phải">→</button>
+      </div>
+      <div class="combat">
+        <button type="button" data-command="fire">Bắn</button>
+        <button type="button" id="reload">Nạp đạn</button>
+      </div>
+    </div>
+    <p id="message" aria-live="polite">Nút Bắn tự nhắm vào zombie gần nhất.</p>
+  </main>
+  <script>
+    const board = document.querySelector('canvas');
+    const ctx = board.getContext('2d');
+    const {width, height} = board;
+    const ui = Object.fromEntries(['health', 'ammo', 'wave', 'score', 'overlay', 'result', 'start', 'message', 'reload'].map(id => [id, document.getElementById(id)]));
+    const keys = new Map([
+      ['w', 'up'], ['arrowup', 'up'], ['s', 'down'], ['arrowdown', 'down'],
+      ['a', 'left'], ['arrowleft', 'left'], ['d', 'right'], ['arrowright', 'right'], [' ', 'fire']
+    ]);
+    const keyboard = new Set();
+    const touches = new Map();
+    const clipSize = 10;
+    const waves = [7, 12, 18];
+    let player, zombies, bullets, wave, remaining, nextSpawn, score, lastTime;
+    let aim, mouseHeld, active, frameId;
+
+    function reset() {
+      player = {x: width / 2, y: height / 2, angle: -Math.PI / 2, health: 100, ammo: clipSize, reload: 0, cooldown: 0, invulnerable: 0};
+      zombies = [];
+      bullets = [];
+      wave = 0;
+      score = 0;
+      clearInput();
+      aim = null;
+      updateHud();
+      draw();
+    }
+
+    function clearInput() {
+      keyboard.clear();
+      touches.clear();
+      mouseHeld = false;
+    }
+
+    function updateHud() {
+      ui.health.textContent = 'Máu ' + player.health + '%';
+      ui.ammo.textContent = player.reload ? 'Đang nạp đạn…' : 'Đạn ' + player.ammo + ' / ' + clipSize;
+      ui.wave.textContent = 'Đợt ' + (wave + 1) + ' / ' + waves.length;
+      ui.score.textContent = 'Đã hạ ' + score;
+    }
+
+    function startWave() {
+      remaining = waves[wave];
+      nextSpawn = 1.6;
+      ui.message.textContent = 'Đợt ' + (wave + 1) + ' đang đến.';
+    }
+
+    function start() {
+      if (active) return;
+      reset();
+      active = true;
+      ui.overlay.hidden = true;
+      lastTime = null;
+      startWave();
+      frameId = requestAnimationFrame(frame);
+    }
+
+    function end(won) {
+      active = false;
+      clearInput();
+      ui.result.textContent = won ? 'Sơ tán thành công!' : 'Zombie đã áp sát!';
+      ui.message.textContent = won ? 'Bạn đã sống sót qua ba đợt zombie.' : 'Bạn đã hạ ' + score + ' zombie.';
+      ui.start.textContent = 'Chơi lại';
+      ui.overlay.hidden = false;
+      ui.start.focus();
+    }
+
+    function reload() {
+      if (active && player.ammo < clipSize && !player.reload) player.reload = 0.9;
+    }
+
+    function spawn() {
+      const side = Math.floor(Math.random() * 4);
+      const x = side === 0 ? -15 : side === 1 ? width + 15 : 22 + Math.random() * (width - 44);
+      const y = side === 2 ? -15 : side === 3 ? height + 15 : 22 + Math.random() * (height - 44);
+      zombies.push({x, y, angle: 0, speed: 57 + wave * 21 + Math.random() * 23});
+    }
+
+    function fire(target) {
+      if (player.reload || player.cooldown) return;
+      if (player.ammo === 0) {
+        reload();
+        return;
+      }
+      if (!target) return;
+      player.angle = Math.atan2(target.y - player.y, target.x - player.x);
+      player.ammo -= 1;
+      player.cooldown = 0.19;
+      const dx = Math.cos(player.angle);
+      const dy = Math.sin(player.angle);
+      bullets.push({x: player.x + dx * 19, y: player.y + dy * 19, vx: dx * 690, vy: dy * 690});
+    }
+
+    function movePlayer(commands, dt) {
+      const dx = Number(commands.has('right')) - Number(commands.has('left'));
+      const dy = Number(commands.has('down')) - Number(commands.has('up'));
+      if (dx || dy) {
+        const speed = 206 * dt / Math.hypot(dx, dy);
+        player.x = Math.max(17, Math.min(width - 17, player.x + dx * speed));
+        player.y = Math.max(17, Math.min(height - 17, player.y + dy * speed));
+      }
+      if (aim) player.angle = Math.atan2(aim.y - player.y, aim.x - player.x);
+      if (mouseHeld) fire(aim);
+      else if (commands.has('fire')) {
+        const nearest = zombies.reduce((best, zombie) =>
+          Math.hypot(zombie.x - player.x, zombie.y - player.y) < Math.hypot(best.x - player.x, best.y - player.y) ? zombie : best,
+          {x: Infinity, y: Infinity});
+        if (Number.isFinite(nearest.x)) fire(nearest);
+        else if (!player.ammo) reload();
+      }
+    }
+
+    function update(dt) {
+      player.cooldown = Math.max(0, player.cooldown - dt);
+      player.invulnerable = Math.max(0, player.invulnerable - dt);
+      if (player.reload) {
+        player.reload = Math.max(0, player.reload - dt);
+        if (!player.reload) player.ammo = clipSize;
+      }
+      const commands = new Set([...touches.values()]);
+      for (const key of keyboard) commands.add(keys.get(key));
+      movePlayer(commands, dt);
+      nextSpawn -= dt;
+      if (remaining && nextSpawn <= 0) {
+        spawn();
+        remaining -= 1;
+        nextSpawn = 0.69 - wave * 0.12;
+      }
+      bullets = bullets.filter(bullet => {
+        bullet.x += bullet.vx * dt;
+        bullet.y += bullet.vy * dt;
+        const hit = zombies.findIndex(zombie => Math.hypot(zombie.x - bullet.x, zombie.y - bullet.y) < 17);
+        if (hit >= 0) {
+          zombies.splice(hit, 1);
+          score += 1;
+          return false;
+        }
+        return bullet.x > -24 && bullet.x < width + 24 && bullet.y > -24 && bullet.y < height + 24;
+      });
+      for (const zombie of zombies) {
+        const dx = player.x - zombie.x;
+        const dy = player.y - zombie.y;
+        const distance = Math.hypot(dx, dy);
+        zombie.angle = Math.atan2(dy, dx);
+        if (distance > 20) {
+          const step = Math.min(zombie.speed * dt, distance - 20);
+          zombie.x += dx * step / distance;
+          zombie.y += dy * step / distance;
+        }
+        if (distance < 28 && player.invulnerable === 0) {
+          player.health = Math.max(0, player.health - 20);
+          player.invulnerable = 0.65;
+        }
+      }
+      if (!player.health) end(false);
+      else if (!remaining && !zombies.length) {
+        if (wave + 1 === waves.length) end(true);
+        else {
+          wave += 1;
+          startWave();
+        }
+      }
+      updateHud();
+    }
+
+    function circle(x, y, radius, color) {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function drawFighter(entity, color, weapon) {
+      ctx.save();
+      ctx.translate(entity.x, entity.y);
+      ctx.rotate(entity.angle);
+      circle(-3, 4, 15, '#111615');
+      ctx.fillStyle = color;
+      ctx.fillRect(-8, -13, 15, 26);
+      circle(2, 0, 8, weapon ? '#e7d8be' : '#a6b876');
+      ctx.fillStyle = weapon ? '#f5bf55' : color;
+      ctx.fillRect(5, -11, weapon ? 17 : 11, 4);
+      ctx.fillRect(5, 7, 11, 4);
+      ctx.restore();
+    }
+
+    function draw() {
+      ctx.fillStyle = '#252d28';
+      ctx.fillRect(0, 0, width, height);
+      ctx.fillStyle = '#1e2420';
+      ctx.fillRect(0, 60, width, height - 120);
+      ctx.fillStyle = '#41483e';
+      ctx.fillRect(0, 67, width, 2);
+      ctx.fillRect(0, height - 69, width, 2);
+      for (let x = 0; x < width; x += 92) ctx.fillRect(x, height / 2 - 1, 47, 2);
+      for (const zombie of zombies) drawFighter(zombie, '#738459', false);
+      for (const bullet of bullets) circle(bullet.x, bullet.y, 3, '#ffce74');
+      drawFighter(player, player.invulnerable ? '#bd6d56' : '#b4c3bf', true);
+      if (aim && active) {
+        ctx.strokeStyle = '#f4efda';
+        ctx.strokeRect(aim.x - 5, aim.y - 5, 10, 10);
+      }
+    }
+
+    function frame(now) {
+      if (!active) return;
+      const dt = lastTime === null ? 0 : Math.min((now - lastTime) / 1000, 1 / 30);
+      lastTime = now;
+      update(dt);
+      draw();
+      if (active) frameId = requestAnimationFrame(frame);
+    }
+
+    function setAim(event) {
+      const rect = board.getBoundingClientRect();
+      aim = {x: (event.clientX - rect.left) * width / rect.width, y: (event.clientY - rect.top) * height / rect.height};
+    }
+
+    board.addEventListener('pointermove', event => {
+      if (event.pointerType !== 'touch') setAim(event);
+    });
+    board.addEventListener('pointerdown', event => {
+      if (!active || event.button !== 0) return;
+      setAim(event);
+      fire(aim);
+      mouseHeld = true;
+      board.setPointerCapture(event.pointerId);
+    });
+    for (const eventName of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+      board.addEventListener(eventName, () => { mouseHeld = false; });
+    }
+    board.addEventListener('pointerleave', () => {
+      if (!mouseHeld) aim = null;
+    });
+
+    document.addEventListener('keydown', event => {
+      if (!active || event.altKey || event.ctrlKey || event.metaKey) return;
+      const key = event.key.toLowerCase();
+      if (key === ' ' && event.target.closest('button')) return;
+      if (key === 'r') {
+        reload();
+      } else if (keys.has(key)) {
+        event.preventDefault();
+        keyboard.add(key);
+      }
+    });
+    document.addEventListener('keyup', event => keyboard.delete(event.key.toLowerCase()));
+    document.querySelectorAll('[data-command]').forEach(button => {
+      button.addEventListener('pointerdown', event => {
+        if (!active || event.button !== 0) return;
+        event.preventDefault();
+        touches.set(event.pointerId, button.dataset.command);
+        button.setPointerCapture(event.pointerId);
+      });
+      for (const eventName of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+        button.addEventListener(eventName, event => touches.delete(event.pointerId));
+      }
+    });
+    window.addEventListener('blur', clearInput);
+    document.addEventListener('visibilitychange', () => {
+      if (!active) return;
+      if (document.hidden) {
+        clearInput();
+        cancelAnimationFrame(frameId);
+      } else {
+        lastTime = null;
+        frameId = requestAnimationFrame(frame);
+      }
+    });
+    ui.start.addEventListener('click', start);
+    ui.reload.addEventListener('click', reload);
+    reset();
+  </script>
+</body>
+</html>
